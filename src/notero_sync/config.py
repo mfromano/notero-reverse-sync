@@ -11,6 +11,7 @@ class Settings(BaseSettings):
 
     # Zotero
     zotero_api_key: str
+    zotero_group_id: int | None = None
 
     # Database
     database_url: str = "sqlite+aiosqlite:///./notero_sync.db"

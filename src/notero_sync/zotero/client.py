@@ -1,5 +1,8 @@
 import asyncio
+import hashlib
+import io
 import logging
+import os
 from dataclasses import dataclass
 
 import httpx
@@ -142,19 +145,121 @@ class ZoteroClient:
             data=created["data"],
         )
 
-    async def get_child_notes(
-        self, library_type: str, library_id: int, item_key: str
+    async def create_item(
+        self,
+        library_type: str,
+        library_id: int,
+        data: dict,
+    ) -> ZoteroItem:
+        """Create an item in a library. Returns the created item."""
+        library_id = await self._resolve_library_id(library_type, library_id)
+        url = f"/{library_type}/{library_id}/items"
+        resp = await self._request("POST", url, json=[data])
+        resp.raise_for_status()
+
+        result = resp.json()
+        created = result["successful"]["0"]
+        return ZoteroItem(
+            key=created["key"],
+            version=created["version"],
+            data=created["data"],
+        )
+
+    async def upload_attachment(
+        self,
+        library_type: str,
+        library_id: int,
+        parent_key: str,
+        filepath: str,
+    ) -> ZoteroItem:
+        """Create an imported_file attachment and upload the file content."""
+        library_id = await self._resolve_library_id(library_type, library_id)
+        filename = os.path.basename(filepath)
+        filesize = os.path.getsize(filepath)
+
+        with open(filepath, "rb") as f:
+            content = f.read()
+        md5 = hashlib.md5(content).hexdigest()
+        mtime = int(os.path.getmtime(filepath) * 1000)
+
+        # Create the attachment item
+        att_data = {
+            "itemType": "attachment",
+            "parentItem": parent_key,
+            "linkMode": "imported_file",
+            "title": filename,
+            "contentType": "application/pdf",
+            "filename": filename,
+            "tags": [],
+        }
+        att = await self.create_item(library_type, library_id, att_data)
+
+        # Get upload authorization
+        resp = await self._request(
+            "POST",
+            f"/{library_type}/{library_id}/items/{att.key}/file",
+            headers={
+                "If-None-Match": "*",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            content=f"md5={md5}&filename={filename}&filesize={filesize}&mtime={mtime}",
+        )
+        resp.raise_for_status()
+        auth = resp.json()
+
+        if auth.get("exists"):
+            logger.debug("File %s already on server, linked to %s", filename, att.key)
+            return att
+
+        # Upload to S3
+        params = dict(auth["params"])
+        content_type = params.pop("Content-Type", "application/pdf")
+        async with httpx.AsyncClient(timeout=120.0) as upload_client:
+            upload_resp = await upload_client.post(
+                auth["url"],
+                data=params,
+                files={"file": (filename, io.BytesIO(content), content_type)},
+            )
+            upload_resp.raise_for_status()
+
+        # Register the upload
+        reg_resp = await self._request(
+            "POST",
+            f"/{library_type}/{library_id}/items/{att.key}/file",
+            headers={
+                "If-None-Match": "*",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            content=f"upload={auth['uploadKey']}",
+        )
+        reg_resp.raise_for_status()
+        logger.debug("Uploaded %s to %s", filename, att.key)
+
+        return att
+
+    async def get_children(
+        self, library_type: str, library_id: int, item_key: str,
+        item_type: str | None = None,
     ) -> list[ZoteroItem]:
-        """Get all child note items for a parent item."""
+        """Get child items for a parent item, optionally filtered by type."""
         library_id = await self._resolve_library_id(library_type, library_id)
         url = f"/{library_type}/{library_id}/items/{item_key}/children"
-        resp = await self._request("GET", url, params={"itemType": "note"})
+        params = {}
+        if item_type:
+            params["itemType"] = item_type
+        resp = await self._request("GET", url, params=params)
         resp.raise_for_status()
 
         return [
             ZoteroItem(key=item["key"], version=item["version"], data=item["data"])
             for item in resp.json()
         ]
+
+    async def get_child_notes(
+        self, library_type: str, library_id: int, item_key: str
+    ) -> list[ZoteroItem]:
+        """Get all child note items for a parent item."""
+        return await self.get_children(library_type, library_id, item_key, item_type="note")
 
     async def get_collections(
         self, library_type: str, library_id: int
