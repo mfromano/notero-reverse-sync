@@ -1,0 +1,176 @@
+import asyncio
+import logging
+from dataclasses import dataclass
+
+import httpx
+
+logger = logging.getLogger(__name__)
+
+ZOTERO_API_BASE = "https://api.zotero.org"
+
+
+class ZoteroConflictError(Exception):
+    """Raised on 412 Precondition Failed (version conflict)."""
+
+    def __init__(self, current_version: int):
+        self.current_version = current_version
+        super().__init__(f"Version conflict, current version: {current_version}")
+
+
+class ZoteroNotFoundError(Exception):
+    """Raised when a Zotero item is not found (404)."""
+
+
+@dataclass
+class ZoteroItem:
+    key: str
+    version: int
+    data: dict
+
+
+class ZoteroClient:
+    def __init__(self, api_key: str) -> None:
+        self._client = httpx.AsyncClient(
+            base_url=ZOTERO_API_BASE,
+            headers={
+                "Zotero-API-Key": api_key,
+                "Content-Type": "application/json",
+            },
+            timeout=30.0,
+        )
+
+    async def close(self) -> None:
+        await self._client.aclose()
+
+    async def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
+        """Make a request with rate-limit handling."""
+        resp = await self._client.request(method, url, **kwargs)
+
+        if resp.status_code == 429:
+            retry_after = int(resp.headers.get("Retry-After", "5"))
+            logger.warning("Zotero rate limited, retrying after %d seconds", retry_after)
+            await asyncio.sleep(retry_after)
+            resp = await self._client.request(method, url, **kwargs)
+
+        return resp
+
+    async def get_item(self, library_type: str, library_id: int, item_key: str) -> ZoteroItem:
+        url = f"/{library_type}/{library_id}/items/{item_key}"
+        resp = await self._request("GET", url)
+
+        if resp.status_code == 404:
+            raise ZoteroNotFoundError(f"Item not found: {url}")
+        resp.raise_for_status()
+
+        data = resp.json()
+        version = int(resp.headers.get("Last-Modified-Version", data.get("version", 0)))
+        return ZoteroItem(key=data["key"], version=version, data=data["data"])
+
+    async def patch_item(
+        self,
+        library_type: str,
+        library_id: int,
+        item_key: str,
+        data: dict,
+        version: int,
+    ) -> int:
+        """PATCH a Zotero item. Returns the new version on success."""
+        url = f"/{library_type}/{library_id}/items/{item_key}"
+        resp = await self._request(
+            "PATCH",
+            url,
+            json=data,
+            headers={"If-Unmodified-Since-Version": str(version)},
+        )
+
+        if resp.status_code == 412:
+            new_version = int(resp.headers.get("Last-Modified-Version", "0"))
+            raise ZoteroConflictError(new_version)
+        if resp.status_code == 404:
+            raise ZoteroNotFoundError(f"Item not found: {url}")
+        resp.raise_for_status()
+
+        return int(resp.headers.get("Last-Modified-Version", str(version)))
+
+    async def create_note(
+        self,
+        library_type: str,
+        library_id: int,
+        parent_key: str,
+        note_html: str,
+        tags: list[dict] | None = None,
+    ) -> ZoteroItem:
+        """Create a child note on a Zotero item."""
+        url = f"/{library_type}/{library_id}/items"
+        payload = [
+            {
+                "itemType": "note",
+                "parentItem": parent_key,
+                "note": note_html,
+                "tags": tags or [],
+            }
+        ]
+        resp = await self._request("POST", url, json=payload)
+        resp.raise_for_status()
+
+        result = resp.json()
+        # Zotero returns {"successful": {"0": {...}}, ...}
+        created = result["successful"]["0"]
+        return ZoteroItem(
+            key=created["key"],
+            version=created["version"],
+            data=created["data"],
+        )
+
+    async def get_child_notes(
+        self, library_type: str, library_id: int, item_key: str
+    ) -> list[ZoteroItem]:
+        """Get all child note items for a parent item."""
+        url = f"/{library_type}/{library_id}/items/{item_key}/children"
+        resp = await self._request("GET", url, params={"itemType": "note"})
+        resp.raise_for_status()
+
+        return [
+            ZoteroItem(key=item["key"], version=item["version"], data=item["data"])
+            for item in resp.json()
+        ]
+
+    async def get_collections(
+        self, library_type: str, library_id: int
+    ) -> list[dict]:
+        """Get all collections in a library. Returns list of {key, name}."""
+        url = f"/{library_type}/{library_id}/collections"
+        all_collections = []
+        start = 0
+        limit = 100
+
+        while True:
+            resp = await self._request(
+                "GET", url, params={"start": start, "limit": limit}
+            )
+            resp.raise_for_status()
+            items = resp.json()
+            for item in items:
+                all_collections.append(
+                    {"key": item["key"], "name": item["data"]["name"]}
+                )
+            if len(items) < limit:
+                break
+            start += limit
+
+        return all_collections
+
+    async def delete_item(
+        self, library_type: str, library_id: int, item_key: str, version: int
+    ) -> None:
+        """Delete a Zotero item."""
+        url = f"/{library_type}/{library_id}/items/{item_key}"
+        resp = await self._request(
+            "DELETE",
+            url,
+            headers={"If-Unmodified-Since-Version": str(version)},
+        )
+        if resp.status_code == 412:
+            new_version = int(resp.headers.get("Last-Modified-Version", "0"))
+            raise ZoteroConflictError(new_version)
+        resp.raise_for_status()
