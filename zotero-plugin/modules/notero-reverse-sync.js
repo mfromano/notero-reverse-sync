@@ -68,15 +68,7 @@ class NoteroReverseSyncMain {
       this._collectionResolver,
     );
 
-    // Register preference pane
-    Zotero.PreferencePanes.register({
-      pluginID: "notero-reverse-sync@mfromano",
-      src: rootURI + "content/preferences.xhtml",
-      label: "Notero Reverse Sync",
-      image: rootURI + "icons/icon-48.png",
-    });
-
-    // Start polling
+    // Start polling (preference pane is registered in bootstrap.js)
     this._scheduler = new PollingScheduler(
       this._syncEngine,
       this._noteSyncEngine,
