@@ -117,6 +117,11 @@ async def _process_content_update(event_id: str, page_id: str) -> None:
         parsed = extract_syncable_properties(properties)
         zotero_uri = parsed.get("zotero_uri")
 
+        relevant = parsed.get("Relevant?")
+        if relevant not in ("Yes", "Highly"):
+            logger.debug("Page %s has Relevant=%s, skipping note sync", page_id, relevant)
+            return
+
         if not zotero_uri:
             logger.warning("Page %s has no Zotero URI, skipping note sync", page_id)
             return

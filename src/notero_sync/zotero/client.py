@@ -30,6 +30,7 @@ class ZoteroItem:
 
 class ZoteroClient:
     def __init__(self, api_key: str) -> None:
+        self._api_key = api_key
         self._client = httpx.AsyncClient(
             base_url=ZOTERO_API_BASE,
             headers={
@@ -38,9 +39,25 @@ class ZoteroClient:
             },
             timeout=30.0,
         )
+        self._cached_user_id: int | None = None
 
     async def close(self) -> None:
         await self._client.aclose()
+
+    async def _get_user_id(self) -> int:
+        """Resolve the numeric user ID for the current API key (cached)."""
+        if self._cached_user_id is None:
+            resp = await self._client.get(f"/keys/{self._api_key}")
+            resp.raise_for_status()
+            self._cached_user_id = resp.json()["userID"]
+            logger.info("Resolved Zotero user ID: %d", self._cached_user_id)
+        return self._cached_user_id
+
+    async def _resolve_library_id(self, library_type: str, library_id: int) -> int:
+        """Replace library_id=0 with the real user ID for user libraries."""
+        if library_type == "users" and library_id == 0:
+            return await self._get_user_id()
+        return library_id
 
     async def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
         """Make a request with rate-limit handling."""
@@ -55,6 +72,7 @@ class ZoteroClient:
         return resp
 
     async def get_item(self, library_type: str, library_id: int, item_key: str) -> ZoteroItem:
+        library_id = await self._resolve_library_id(library_type, library_id)
         url = f"/{library_type}/{library_id}/items/{item_key}"
         resp = await self._request("GET", url)
 
@@ -75,6 +93,7 @@ class ZoteroClient:
         version: int,
     ) -> int:
         """PATCH a Zotero item. Returns the new version on success."""
+        library_id = await self._resolve_library_id(library_type, library_id)
         url = f"/{library_type}/{library_id}/items/{item_key}"
         resp = await self._request(
             "PATCH",
@@ -101,6 +120,7 @@ class ZoteroClient:
         tags: list[dict] | None = None,
     ) -> ZoteroItem:
         """Create a child note on a Zotero item."""
+        library_id = await self._resolve_library_id(library_type, library_id)
         url = f"/{library_type}/{library_id}/items"
         payload = [
             {
@@ -126,6 +146,7 @@ class ZoteroClient:
         self, library_type: str, library_id: int, item_key: str
     ) -> list[ZoteroItem]:
         """Get all child note items for a parent item."""
+        library_id = await self._resolve_library_id(library_type, library_id)
         url = f"/{library_type}/{library_id}/items/{item_key}/children"
         resp = await self._request("GET", url, params={"itemType": "note"})
         resp.raise_for_status()
@@ -139,6 +160,7 @@ class ZoteroClient:
         self, library_type: str, library_id: int
     ) -> list[dict]:
         """Get all collections in a library. Returns list of {key, name}."""
+        library_id = await self._resolve_library_id(library_type, library_id)
         url = f"/{library_type}/{library_id}/collections"
         all_collections = []
         start = 0
@@ -164,6 +186,7 @@ class ZoteroClient:
         self, library_type: str, library_id: int, item_key: str, version: int
     ) -> None:
         """Delete a Zotero item."""
+        library_id = await self._resolve_library_id(library_type, library_id)
         url = f"/{library_type}/{library_id}/items/{item_key}"
         resp = await self._request(
             "DELETE",

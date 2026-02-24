@@ -48,6 +48,12 @@ async def bootstrap() -> None:
             properties = page.get("properties", {})
             parsed = extract_syncable_properties(properties)
 
+            relevant = parsed.get("Relevant?")
+            if relevant not in ("Yes", "Highly"):
+                logger.debug("Page %s has Relevant=%s, skipping", page_id, relevant)
+                skipped += 1
+                continue
+
             zotero_uri = parsed.get("zotero_uri")
             if not zotero_uri:
                 logger.debug("Page %s has no Zotero URI, skipping", page_id)

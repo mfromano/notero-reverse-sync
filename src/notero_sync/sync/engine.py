@@ -42,7 +42,13 @@ class SyncEngine:
         properties = await self._notion.get_page_properties(notion_page_id)
         parsed = extract_syncable_properties(properties)
 
-        # 2. Extract Zotero URI
+        # 2. Check relevance filter
+        relevant = parsed.get("Relevant?")
+        if relevant not in ("Yes", "Highly"):
+            logger.debug("Page %s has Relevant=%s, skipping sync", notion_page_id, relevant)
+            return
+
+        # 3. Extract Zotero URI
         zotero_uri = parsed.get("zotero_uri")
         if not zotero_uri:
             logger.warning("Page %s has no Zotero URI, skipping", notion_page_id)

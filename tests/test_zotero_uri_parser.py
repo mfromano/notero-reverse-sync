@@ -18,6 +18,16 @@ def test_parse_uri_without_www():
     assert ref.item_key == "ZZZZ0000"
 
 
+def test_parse_username_slug_uri():
+    ref = parse_zotero_uri("https://zotero.org/mfromano/items/WFHVZPHT")
+    assert ref == ZoteroItemRef(library_type="users", library_id=0, item_key="WFHVZPHT")
+
+
+def test_parse_username_slug_uri_with_www():
+    ref = parse_zotero_uri("https://www.zotero.org/someuser/items/ABC12345")
+    assert ref == ZoteroItemRef(library_type="users", library_id=0, item_key="ABC12345")
+
+
 def test_parse_invalid_uri():
     assert parse_zotero_uri("https://google.com") is None
     assert parse_zotero_uri("not a url") is None
